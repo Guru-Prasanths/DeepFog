@@ -1,0 +1,2 @@
+[functions.sensor-ingest]
+verify_jwt = false
