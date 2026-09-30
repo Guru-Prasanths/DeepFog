@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="DEEPFOG — Intelligent Mine Vehicle Safety & Low-Visibility Monitoring System. Real-time multi-sensor fusion dashboard for open-cast mine vehicle safety in fog, dust, rain, and darkness.">
+    <meta name="robots" content="noindex, nofollow">
+    <title>DEEPFOG — Mine Vehicle Safety & Low-Visibility Monitoring</title>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&family=Orbitron:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+
+    <!-- Chart.js for analytics -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+    <!-- Application CSS -->
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <!-- ========================================= -->
+    <!-- FOG PARTICLE BACKGROUND                   -->
+    <!-- ========================================= -->
+    <canvas id="fogCanvas" class="fog-canvas" aria-hidden="true"></canvas>
+
+    <!-- ========================================= -->
+    <!-- PROTOTYPE DISCLAIMER STRIP                -->
+    <!-- ========================================= -->
+    <div class="prototype-strip" role="alert">
+        <span class="prototype-icon">⚙</span>
+        <span>PROTOTYPE / DEMONSTRATION — Simulated sensor data · Safe-speed recommendations are advisory only · Not deployed in a real mine</span>
+    </div>
+
+    <!-- ========================================= -->
+    <!-- TOP HEADER BAR                            -->
+    <!-- ========================================= -->
+    <header class="app-header" id="appHeader" role="banner">
+        <div class="header-left">
+            <div class="brand-logo" aria-hidden="true">
+                <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+                    <circle cx="20" cy="20" r="18" stroke="url(#brandGrad)" stroke-width="2" fill="none" opacity="0.6"/>
+                    <circle cx="20" cy="20" r="12" stroke="url(#brandGrad)" stroke-width="1.5" fill="none" opacity="0.3"/>
+                    <circle cx="20" cy="20" r="5" fill="url(#brandGrad)"/>
+                    <circle cx="20" cy="20" r="2" fill="#0a0e17"/>
+                    <!-- Radar sweep lines -->
+                    <line x1="20" y1="20" x2="20" y2="4" stroke="url(#brandGrad)" stroke-width="1" opacity="0.5">
+                        <animateTransform attributeName="transform" type="rotate" from="0 20 20" to="360 20 20" dur="4s" repeatCount="indefinite"/>
+                    </line>
+                    <defs>
+                        <linearGradient id="brandGrad" x1="0" y1="0" x2="40" y2="40">
+                            <stop offset="0%" stop-color="#00d4ff"/>
+                            <stop offset="50%" stop-color="#7b2ff7"/>
+                            <stop offset="100%" stop-color="#00d4ff"/>
+                        </linearGradient>
+                    </defs>
+                </svg>
+            </div>
+            <div class="brand-text">
+                <h1 class="brand-name">DEEPFOG</h1>
+                <p class="brand-tagline">Intelligent Mine Vehicle Safety & Low-Visibility Monitoring</p>
+            </div>
+        </div>
+
+        <div class="header-center">
+            <div class="header-clock">
+                <span class="clock-date" id="headerDate">--</span>
+                <span class="clock-time" id="headerTime">--:--:--</span>
+            </div>
+        </div>
+
+        <div class="header-right">
+            <div class="header-metric">
+                <span class="metric-label">UPTIME</span>
+                <span class="metric-value" id="systemUptime">00:00:00</span>
+            </div>
+            <div class="alert-badge" id="alertBadge" title="Active alerts">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                    <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                </svg>
+                <span class="badge-count" id="alertCount">0</span>
+            </div>
+            <div class="system-status" id="systemStatusBadge" role="status" aria-live="polite">
+                <span class="status-pulse" id="statusPulse"></span>
+                <span class="status-label" id="systemStatusText">INITIALIZING</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- ========================================= -->
+    <!-- MAIN DASHBOARD                            -->
+    <!-- ========================================= -->
+    <main class="dashboard-main" role="main">
+
+        <!-- ===== ROW 1: KEY METRICS ===== -->
+        <div class="metrics-strip" id="metricsStrip">
+            <div class="metric-card" id="metricVisibility">
+                <div class="mc-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                </div>
+                <div class="mc-data">
+                    <span class="mc-value" id="visibilityDistance">--</span>
+                    <span class="mc-unit">m visibility</span>
+                </div>
+                <div class="mc-bar"><div class="mc-bar-fill" id="visibilityBar" style="width:0%"></div></div>
+            </div>
+
+            <div class="metric-card" id="metricFog">
+                <div class="mc-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 15h4l3-9 4 18 3-9h4"/></svg>
+                </div>
+                <div class="mc-data">
+                    <span class="mc-value" id="fogDensity">--</span>
+                    <span class="mc-unit">% fog density</span>
+                </div>
+                <div class="mc-bar"><div class="mc-bar-fill fog" id="fogBar" style="width:0%"></div></div>
+            </div>
+
+            <div class="metric-card" id="metricDust">
+                <div class="mc-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
+                </div>
+                <div class="mc-data">
+                    <span class="mc-value" id="dustLevel">--</span>
+                    <span class="mc-unit">% dust level</span>
+                </div>
+                <div class="mc-bar"><div class="mc-bar-fill dust" id="dustBar" style="width:0%"></div></div>
+            </div>
+
+            <div class="metric-card" id="metricTemp">
+                <div class="mc-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>
+                </div>
+                <div class="mc-data">
+                    <span class="mc-value" id="ambientTemp">--</span>
+                    <span class="mc-unit">°C ambient</span>
+                </div>
+                <div class="mc-bar"><div class="mc-bar-fill temp" id="tempBar" style="width:0%"></div></div>
+            </div>
+
+            <div class="metric-card" id="metricHumidity">
+                <div class="mc-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
+                </div>
+                <div class="mc-data">
+                    <span class="mc-value" id="humidityVal">--</span>
+                    <span class="mc-unit">% humidity</span>
+                </div>
+                <div class="mc-bar"><div class="mc-bar-fill humidity" id="humidityBar" style="width:0%"></div></div>
+            </div>
+
+            <div class="metric-card" id="metricRain">
+                <div class="mc-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 17H4a3 3 0 0 1 0-6h.5A5.5 5.5 0 0 1 15 7h1a5 5 0 0 1 4 10z"/><path d="M8 19v2M12 19v2M16 19v2"/></svg>
+                </div>
+                <div class="mc-data">
+                    <span class="mc-value" id="rainIntensity">--</span>
+                    <span class="mc-unit">rain</span>
+                </div>
+                <div class="mc-bar"><div class="mc-bar-fill rain" id="rainBar" style="width:0%"></div></div>
+            </div>
+
+            <div class="metric-card" id="metricLight">
+                <div class="mc-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+                </div>
+                <div class="mc-data">
+                    <span class="mc-value" id="ambientLight">--</span>
+                    <span class="mc-unit">lux</span>
+                </div>
+                <div class="mc-bar"><div class="mc-bar-fill light" id="lightBar" style="width:0%"></div></div>
+            </div>
+        </div>
+
+        <!-- ===== ROW 2: MAIN PANELS ===== -->
+        <div class="dashboard-grid">
+
+            <!-- LEFT COLUMN -->
+            <div class="grid-col grid-col-left">
+
+                <!-- Vehicle Info Panel -->
+                <div class="panel panel-vehicle" id="vehiclePanel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="3" width="15" height="13" rx="2"/><polygon points="23 8 16 12 16 4"/></svg>
+                            Vehicle Status
+                        </h2>
+                        <span class="panel-badge online" id="vehicleStatusBadge">ACTIVE</span>
+                    </div>
+                    <div class="vehicle-info-grid">
+                        <div class="vi-row">
+                            <span class="vi-label">Vehicle ID</span>
+                            <span class="vi-value mono" id="vehicleId">HMV-042</span>
+                        </div>
+                        <div class="vi-row">
+                            <span class="vi-label">Type</span>
+                            <span class="vi-value" id="vehicleType">240T Haul Truck</span>
+                        </div>
+                        <div class="vi-row">
+                            <span class="vi-label">Operator</span>
+                            <span class="vi-value" id="vehicleOperator">Demo Operator</span>
+                        </div>
+                        <div class="vi-row">
+                            <span class="vi-label">Shift</span>
+                            <span class="vi-value" id="vehicleShift">Day Shift — A</span>
+                        </div>
+                        <div class="vi-row">
+                            <span class="vi-label">Payload</span>
+                            <span class="vi-value" id="vehiclePayload">182 T</span>
+                        </div>
+                        <div class="vi-row">
+                            <span class="vi-label">Fuel</span>
+                            <div class="vi-bar-wrap">
+                                <div class="vi-bar"><div class="vi-bar-fill" id="fuelBar" style="width:72%"></div></div>
+                                <span class="vi-value mono" id="fuelValue">72%</span>
+                            </div>
+                        </div>
+                        <div class="vi-row">
+                            <span class="vi-label">Engine RPM</span>
+                            <span class="vi-value mono" id="engineRPM">1,450</span>
+                        </div>
+                        <div class="vi-row">
+                            <span class="vi-label">GPS</span>
+                            <span class="vi-value mono" id="vehicleGPS">22.1466° N, 85.4988° E</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sensor Fusion Panel -->
+                <div class="panel panel-sensors" id="sensorFusionPanel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+                            Sensor Fusion
+                        </h2>
+                        <span class="panel-badge" id="sensorFusionScore">--</span>
+                    </div>
+                    <div class="sensor-list" id="sensorList">
+                        <!-- LiDAR -->
+                        <div class="sensor-item" data-sensor="lidar">
+                            <div class="si-status online" id="lidarStatus"></div>
+                            <div class="si-info">
+                                <span class="si-name">LiDAR</span>
+                                <span class="si-detail" id="lidarDetail">200m range · 150k pts/s</span>
+                            </div>
+                            <div class="si-quality">
+                                <div class="quality-bar"><div class="quality-fill" id="lidarQuality" style="width:92%"></div></div>
+                                <span class="quality-pct" id="lidarPct">92%</span>
+                            </div>
+                        </div>
+                        <!-- Radar -->
+                        <div class="sensor-item" data-sensor="radar">
+                            <div class="si-status online" id="radarStatus"></div>
+                            <div class="si-info">
+                                <span class="si-name">Radar</span>
+                                <span class="si-detail" id="radarDetail">150m range · 3 targets</span>
+                            </div>
+                            <div class="si-quality">
+                                <div class="quality-bar"><div class="quality-fill" id="radarQuality" style="width:88%"></div></div>
+                                <span class="quality-pct" id="radarPct">88%</span>
+                            </div>
+                        </div>
+                        <!-- Camera (Visible) -->
+                        <div class="sensor-item" data-sensor="camera">
+                            <div class="si-status online" id="cameraStatus"></div>
+                            <div class="si-info">
+                                <span class="si-name">Camera (Visible)</span>
+                                <span class="si-detail" id="cameraDetail">1080p · 30fps</span>
+                            </div>
+                            <div class="si-quality">
+                                <div class="quality-bar"><div class="quality-fill" id="cameraQuality" style="width:75%"></div></div>
+                                <span class="quality-pct" id="cameraPct">75%</span>
+                            </div>
+                        </div>
+                        <!-- Camera (Thermal) -->
+                        <div class="sensor-item" data-sensor="thermal">
+                            <div class="si-status online" id="thermalStatus"></div>
+                            <div class="si-info">
+                                <span class="si-name">Camera (Thermal)</span>
+                                <span class="si-detail" id="thermalDetail">640×480 · 9fps</span>
+                            </div>
+                            <div class="si-quality">
+                                <div class="quality-bar"><div class="quality-fill" id="thermalQuality" style="width:95%"></div></div>
+                                <span class="quality-pct" id="thermalPct">95%</span>
+                            </div>
+                        </div>
+                        <!-- GPS -->
+                        <div class="sensor-item" data-sensor="gps">
+                            <div class="si-status online" id="gpsStatus"></div>
+                            <div class="si-info">
+                                <span class="si-name">GPS/GNSS</span>
+                                <span class="si-detail" id="gpsDetail">12 sats · ±1.2m</span>
+                            </div>
+                            <div class="si-quality">
+                                <div class="quality-bar"><div class="quality-fill" id="gpsQuality" style="width:85%"></div></div>
+                                <span class="quality-pct" id="gpsPct">85%</span>
+                            </div>
+                        </div>
+                        <!-- IMU -->
+                        <div class="sensor-item" data-sensor="imu">
+                            <div class="si-status online" id="imuStatus"></div>
+                            <div class="si-info">
+                                <span class="si-name">IMU (MPU6050)</span>
+                                <span class="si-detail" id="imuDetail">Pitch 2.1° · Roll 0.8°</span>
+                            </div>
+                            <div class="si-quality">
+                                <div class="quality-bar"><div class="quality-fill" id="imuQuality" style="width:97%"></div></div>
+                                <span class="quality-pct" id="imuPct">97%</span>
+                            </div>
+                        </div>
+                        <!-- Ultrasonic -->
+                        <div class="sensor-item" data-sensor="ultrasonic">
+                            <div class="si-status online" id="ultrasonicStatus"></div>
+                            <div class="si-info">
+                                <span class="si-name">Ultrasonic (HC-SR04)</span>
+                                <span class="si-detail" id="ultrasonicDetail">Range: 340 cm</span>
+                            </div>
+                            <div class="si-quality">
+                                <div class="quality-bar"><div class="quality-fill" id="ultrasonicQuality" style="width:90%"></div></div>
+                                <span class="quality-pct" id="ultrasonicPct">90%</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- CENTER COLUMN -->
+            <div class="grid-col grid-col-center">
+
+                <!-- Safe Speed Advisory -->
+                <div class="panel panel-speed" id="speedPanel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            Safe Speed Advisory
+                        </h2>
+                        <span class="panel-badge advisory" id="speedAdvisoryLabel">DRIVER ADVISORY ONLY</span>
+                    </div>
+                    <div class="speed-gauge-container">
+                        <div class="speed-gauge" id="speedGauge">
+                            <svg viewBox="0 0 280 180" class="gauge-svg">
+                                <!-- Background arc -->
+                                <path d="M 30 160 A 110 110 0 0 1 250 160" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="18" stroke-linecap="round"/>
+                                <!-- Speed zones -->
+                                <path d="M 30 160 A 110 110 0 0 1 100 38" fill="none" stroke="rgba(34,197,94,0.3)" stroke-width="18" stroke-linecap="round" id="gaugeZoneGreen"/>
+                                <path d="M 100 38 A 110 110 0 0 1 180 38" fill="none" stroke="rgba(245,158,11,0.3)" stroke-width="18" stroke-linecap="round" id="gaugeZoneYellow"/>
+                                <path d="M 180 38 A 110 110 0 0 1 250 160" fill="none" stroke="rgba(239,68,68,0.3)" stroke-width="18" stroke-linecap="round" id="gaugeZoneRed"/>
+                                <!-- Current speed arc -->
+                                <path d="M 30 160 A 110 110 0 0 1 250 160" fill="none" stroke="url(#speedGradient)" stroke-width="18" stroke-linecap="round" id="gaugeArc" stroke-dasharray="345" stroke-dashoffset="345"/>
+                                <!-- Recommended speed marker -->
+                                <circle cx="140" cy="160" r="4" fill="#00d4ff" id="recommendedMarker">
+                                    <animate attributeName="opacity" values="1;0.4;1" dur="2s" repeatCount="indefinite"/>
+                                </circle>
+                                <!-- Tick marks -->
+                                <text x="25" y="175" fill="#5a6478" font-size="11" font-family="Inter">0</text>
+                                <text x="60" y="50" fill="#5a6478" font-size="11" font-family="Inter">15</text>
+                                <text x="130" y="25" fill="#5a6478" font-size="11" font-family="Inter">30</text>
+                                <text x="205" y="50" fill="#5a6478" font-size="11" font-family="Inter">45</text>
+                                <text x="245" y="175" fill="#5a6478" font-size="11" font-family="Inter">60</text>
+                                <defs>
+                                    <linearGradient id="speedGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                        <stop offset="0%" stop-color="#22c55e"/>
+                                        <stop offset="50%" stop-color="#f59e0b"/>
+                                        <stop offset="100%" stop-color="#ef4444"/>
+                                    </linearGradient>
+                                </defs>
+                            </svg>
+                            <div class="gauge-center">
+                                <span class="gauge-speed" id="currentSpeed">0</span>
+                                <span class="gauge-unit">km/h</span>
+                            </div>
+                        </div>
+                        <div class="speed-info-row">
+                            <div class="speed-info-item">
+                                <span class="sii-label">CURRENT</span>
+                                <span class="sii-value" id="currentSpeedVal">0 km/h</span>
+                            </div>
+                            <div class="speed-info-item recommended">
+                                <span class="sii-label">RECOMMENDED</span>
+                                <span class="sii-value" id="recommendedSpeed">-- km/h</span>
+                            </div>
+                            <div class="speed-info-item">
+                                <span class="sii-label">ZONE LIMIT</span>
+                                <span class="sii-value" id="zoneLimitSpeed">40 km/h</span>
+                            </div>
+                        </div>
+                        <div class="speed-factors" id="speedFactors">
+                            <div class="sf-item"><span class="sf-label">Visibility Factor</span><span class="sf-value" id="sfVisibility">--</span></div>
+                            <div class="sf-item"><span class="sf-label">Road Condition</span><span class="sf-value" id="sfRoad">--</span></div>
+                            <div class="sf-item"><span class="sf-label">Proximity Risk</span><span class="sf-value" id="sfProximity">--</span></div>
+                            <div class="sf-item"><span class="sf-label">Gradient</span><span class="sf-value" id="sfGradient">--</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Mine Radar / Map View -->
+                <div class="panel panel-radar" id="radarPanel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/><line x1="12" y1="2" x2="12" y2="6"/></svg>
+                            Proximity Radar & Road Awareness
+                        </h2>
+                        <div class="panel-header-controls">
+                            <span class="radar-range-label" id="radarRangeLabel">200m range</span>
+                        </div>
+                    </div>
+                    <div class="radar-canvas-wrap">
+                        <canvas id="radarCanvas" width="520" height="520"></canvas>
+                    </div>
+                    <div class="radar-legend">
+                        <span class="rl-item"><span class="rl-dot self"></span>This Vehicle</span>
+                        <span class="rl-item"><span class="rl-dot vehicle"></span>Other Vehicles</span>
+                        <span class="rl-item"><span class="rl-dot obstacle"></span>Obstacles</span>
+                        <span class="rl-item"><span class="rl-line road"></span>Road Edge</span>
+                        <span class="rl-item"><span class="rl-area visibility"></span>Visibility Range</span>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- RIGHT COLUMN -->
+            <div class="grid-col grid-col-right">
+
+                <!-- Overall Risk Intelligence -->
+                <div class="panel panel-risk" id="riskPanel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                            Mine-Wide Risk Intelligence
+                        </h2>
+                    </div>
+                    <div class="risk-hero" id="riskHero">
+                        <div class="risk-ring" id="riskRing">
+                            <svg viewBox="0 0 120 120" class="risk-ring-svg">
+                                <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="8"/>
+                                <circle cx="60" cy="60" r="52" fill="none" stroke="url(#riskGrad)" stroke-width="8" stroke-dasharray="327" stroke-dashoffset="327" stroke-linecap="round" id="riskArc" transform="rotate(-90 60 60)"/>
+                                <defs>
+                                    <linearGradient id="riskGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                        <stop offset="0%" stop-color="#22c55e"/>
+                                        <stop offset="100%" stop-color="#f59e0b"/>
+                                    </linearGradient>
+                                </defs>
+                            </svg>
+                            <div class="risk-ring-center">
+                                <span class="rr-score" id="riskScore">--</span>
+                                <span class="rr-label">RISK</span>
+                            </div>
+                        </div>
+                        <div class="risk-level-badge" id="riskLevelBadge">
+                            <span id="riskLevelText">CALCULATING</span>
+                        </div>
+                        <div class="risk-trend" id="riskTrend">
+                            <span class="trend-arrow" id="trendArrow">→</span>
+                            <span class="trend-label" id="trendLabel">Stable</span>
+                        </div>
+                    </div>
+                    <div class="risk-factors" id="riskFactors">
+                        <div class="rf-item">
+                            <span class="rf-name">Visibility</span>
+                            <div class="rf-bar"><div class="rf-fill" id="rfVisibility" style="width:0%"></div></div>
+                            <span class="rf-val" id="rfVisibilityVal">--</span>
+                        </div>
+                        <div class="rf-item">
+                            <span class="rf-name">Proximity</span>
+                            <div class="rf-bar"><div class="rf-fill" id="rfProximity" style="width:0%"></div></div>
+                            <span class="rf-val" id="rfProximityVal">--</span>
+                        </div>
+                        <div class="rf-item">
+                            <span class="rf-name">Road Edge</span>
+                            <div class="rf-bar"><div class="rf-fill" id="rfRoadEdge" style="width:0%"></div></div>
+                            <span class="rf-val" id="rfRoadEdgeVal">--</span>
+                        </div>
+                        <div class="rf-item">
+                            <span class="rf-name">Speed</span>
+                            <div class="rf-bar"><div class="rf-fill" id="rfSpeed" style="width:0%"></div></div>
+                            <span class="rf-val" id="rfSpeedVal">--</span>
+                        </div>
+                        <div class="rf-item">
+                            <span class="rf-name">Weather</span>
+                            <div class="rf-bar"><div class="rf-fill" id="rfWeather" style="width:0%"></div></div>
+                            <span class="rf-val" id="rfWeatherVal">--</span>
+                        </div>
+                        <div class="rf-item">
+                            <span class="rf-name">Terrain</span>
+                            <div class="rf-bar"><div class="rf-fill" id="rfTerrain" style="width:0%"></div></div>
+                            <span class="rf-val" id="rfTerrainVal">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- V2V Communication -->
+                <div class="panel panel-v2v" id="v2vPanel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5.636 18.364A9 9 0 1 1 18.364 5.636"/><path d="M8.464 15.536A5 5 0 1 1 15.536 8.464"/><circle cx="12" cy="12" r="1"/></svg>
+                            V2V Communication
+                        </h2>
+                        <span class="panel-badge v2v" id="v2vCount">0 nearby</span>
+                    </div>
+                    <div class="v2v-list" id="v2vList">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== ROW 3: EVENT LOG + ANALYTICS ===== -->
+        <div class="dashboard-bottom">
+
+            <!-- Event Log -->
+            <div class="panel panel-events" id="eventsPanel">
+                <div class="panel-header">
+                    <h2 class="panel-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                        Event Log
+                    </h2>
+                    <div class="panel-header-controls">
+                        <select id="eventFilter" class="event-filter-select">
+                            <option value="all">All Events</option>
+                            <option value="safety">Safety</option>
+                            <option value="sensor">Sensor</option>
+                            <option value="navigation">Navigation</option>
+                            <option value="communication">Communication</option>
+                            <option value="system">System</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="event-log-scroll" id="eventLogScroll">
+                    <div class="event-log-list" id="eventLogList">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Analytics Charts -->
+            <div class="panel panel-analytics" id="analyticsPanel">
+                <div class="panel-header">
+                    <h2 class="panel-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                        Operational Analytics
+                    </h2>
+                    <div class="panel-header-controls">
+                        <button class="chart-tab active" data-chart="speed" id="chartTabSpeed">Speed</button>
+                        <button class="chart-tab" data-chart="visibility" id="chartTabVisibility">Visibility</button>
+                        <button class="chart-tab" data-chart="risk" id="chartTabRisk">Risk</button>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="analyticsChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- ========================================= -->
+    <!-- NOTIFICATION TOAST CONTAINER              -->
+    <!-- ========================================= -->
+    <div class="toast-container" id="toastContainer" aria-live="polite"></div>
+
+    <!-- ========================================= -->
+    <!-- FOOTER                                    -->
+    <!-- ========================================= -->
+    <footer class="app-footer" role="contentinfo">
+        <div class="footer-content">
+            <span class="footer-brand">DEEPFOG v2.0</span>
+            <span class="footer-sep">·</span>
+            <span>Prototype / Demonstration System</span>
+            <span class="footer-sep">·</span>
+            <span>Safe-speed recommendations are driver decision-support only</span>
+            <span class="footer-sep">·</span>
+            <span>Not deployed in a real mine · No autonomous vehicle control</span>
+        </div>
+    </footer>
+
+    <!-- Application JavaScript -->
+    <script src="js/deepfog.js"></script>
+</body>
+</html>

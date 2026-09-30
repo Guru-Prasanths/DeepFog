@@ -1,0 +1,26 @@
+{
+  "name": "deepfog-backend",
+  "version": "1.0.0",
+  "description": "DEEPFOG — Intelligent Mine Vehicle Safety & Low-Visibility Monitoring System Backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [
+    "iot",
+    "mine-safety",
+    "esp32",
+    "sensor-fusion",
+    "deepfog"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "helmet": "^7.1.0",
+    "pg": "^8.13.0"
+  }
+}
