@@ -1,9 +1,13 @@
 /**
- * DEEPFOG v2.0 — Complete Dashboard Controller
+ * DEEPFOG v3.0 — Complete Dashboard Controller
  * Intelligent Mine Vehicle Safety & Low-Visibility Monitoring System
  * 
- * This is a PROTOTYPE / DEMONSTRATION system.
- * All sensor data shown is simulated for demonstration purposes.
+ * DUAL-MODE FRONTEND:
+ *   - Connects to backend API for real/simulated data
+ *   - Falls back to client-side simulation if backend is unavailable
+ *   - WebSocket for real-time push updates
+ *   - Transparent data source labeling (REAL / SIMULATED)
+ * 
  * Safe-speed recommendations are driver decision-support only.
  */
 
@@ -14,13 +18,17 @@
        CONFIGURATION
        ============================================================ */
     const CONFIG = {
-        updateInterval: 1500,      // ms between data updates
+        apiBase: `${window.location.origin}/api`,
+        wsUrl: `ws://${window.location.host}/ws`,
+        updateInterval: 1500,      // ms between data updates (client-side sim fallback)
+        apiPollInterval: 5000,     // ms between API polls
         chartMaxPoints: 40,        // max points on analytics chart
         eventLogMax: 60,           // max events in log
         radarRange: 200,           // meters
         maxSpeed: 60,              // km/h max gauge
         toastDuration: 5000,       // ms toast display
         v2vVehicleCount: 5,        // nearby vehicles to simulate
+        wsReconnectDelay: 3000,    // ms before WS reconnect attempt
     };
 
     /* ============================================================
@@ -55,6 +63,14 @@
         chartData: { speed: [], visibility: [], risk: [], labels: [] },
         activeChartType: 'speed',
         analyticsChart: null,
+        // Backend connection state
+        backendConnected: false,
+        systemMode: 'SIMULATION',   // REAL_HARDWARE | SIMULATION | MIXED
+        dbConnected: false,
+        wsConnected: false,
+        ws: null,
+        lastApiData: null,
+        useClientSim: true,          // true = client-side sim, false = real API data
     };
 
     /* ============================================================
@@ -74,7 +90,7 @@
        INITIALIZATION
        ============================================================ */
     document.addEventListener('DOMContentLoaded', () => {
-        console.log('[DEEPFOG] Initializing Mine Safety Dashboard v2.0...');
+        console.log('[DEEPFOG] Initializing Mine Safety Dashboard v3.0...');
         
         initFogCanvas();
         initClock();
@@ -84,7 +100,13 @@
         generateInitialEvents();
         generateNearbyVehicles();
 
-        // Start main update loop
+        // Try connecting to backend API
+        connectToBackend();
+
+        // Try WebSocket connection
+        connectWebSocket();
+
+        // Start main update loop (client-side sim as fallback)
         updateDashboard();
         setInterval(updateDashboard, CONFIG.updateInterval);
         
@@ -94,8 +116,192 @@
             updateUptime();
         }, 1000);
 
+        // Poll API periodically for mode/health updates
+        setInterval(pollSystemMode, CONFIG.apiPollInterval);
+
         console.log('[DEEPFOG] Dashboard initialized successfully.');
     });
+
+    /* ============================================================
+       BACKEND API CONNECTION
+       ============================================================ */
+    async function connectToBackend() {
+        try {
+            const resp = await fetch(`${CONFIG.apiBase}/health`);
+            if (resp.ok) {
+                const data = await resp.json();
+                state.backendConnected = true;
+                state.systemMode = data.mode || 'SIMULATION';
+                state.dbConnected = data.database?.includes('PostgreSQL') || false;
+                updateModeIndicators();
+                updateSystemStatus('ONLINE');
+
+                addEvent('DEEPFOG backend connected — mode: ' + state.systemMode, 'system', 'success');
+                console.log(`[DEEPFOG] Backend connected. Mode: ${state.systemMode}`);
+            }
+        } catch (err) {
+            state.backendConnected = false;
+            state.useClientSim = true;
+            updateModeIndicators();
+            console.warn('[DEEPFOG] Backend unavailable, using client-side simulation.');
+            addEvent('Backend unavailable — using local simulation', 'system', 'warning');
+        }
+    }
+
+    async function pollSystemMode() {
+        try {
+            const resp = await fetch(`${CONFIG.apiBase}/system/mode`);
+            if (resp.ok) {
+                const { data } = await resp.json();
+                state.backendConnected = true;
+                state.systemMode = data.mode || 'SIMULATION';
+                state.dbConnected = data.dbConnected || false;
+                updateModeIndicators();
+                if (!state.wsConnected) updateSystemStatus('ONLINE');
+            }
+        } catch (err) {
+            if (state.backendConnected) {
+                state.backendConnected = false;
+                updateModeIndicators();
+                updateSystemStatus('OFFLINE');
+                addEvent('Backend connection lost — using local fallback', 'system', 'warning');
+            }
+        }
+    }
+
+    /* ============================================================
+       WEBSOCKET CONNECTION
+       ============================================================ */
+    function connectWebSocket() {
+        try {
+            const ws = new WebSocket(CONFIG.wsUrl);
+
+            ws.onopen = () => {
+                state.ws = ws;
+                state.wsConnected = true;
+                updateSystemStatus('ONLINE');
+                console.log('[WS] WebSocket connected');
+                addEvent('Real-time WebSocket connected', 'communication', 'success');
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    handleWebSocketMessage(msg);
+                } catch (err) {
+                    console.warn('[WS] Invalid message:', err.message);
+                }
+            };
+
+            ws.onclose = () => {
+                state.ws = null;
+                state.wsConnected = false;
+                console.log('[WS] Connection closed. Reconnecting...');
+                setTimeout(connectWebSocket, CONFIG.wsReconnectDelay);
+            };
+
+            ws.onerror = (err) => {
+                console.warn('[WS] WebSocket error');
+                ws.close();
+            };
+        } catch (err) {
+            console.warn('[WS] WebSocket not available:', err.message);
+            setTimeout(connectWebSocket, CONFIG.wsReconnectDelay * 2);
+        }
+    }
+
+    function handleWebSocketMessage(msg) {
+        switch (msg.type) {
+            case 'SYSTEM_STATE':
+                state.systemMode = msg.data.mode || state.systemMode;
+                state.dbConnected = msg.data.dbConnected || false;
+                updateModeIndicators();
+                break;
+
+            case 'SENSOR_UPDATE':
+                // Real sensor data from ESP32
+                if (msg.data.source === 'REAL') {
+                    addEvent(`Real sensor data from ${msg.data.vehicle_id} — Risk: ${msg.data.risk_level}`, 'sensor', 
+                        msg.data.risk_level === 'HIGH' ? 'danger' : msg.data.risk_level === 'MEDIUM' ? 'warning' : 'info');
+                }
+                break;
+
+            case 'SENSOR_BATCH':
+                // Batch sensor updates (from simulation or mixed)
+                break;
+
+            case 'ALERT':
+                if (msg.data) {
+                    const src = msg.data.source === 'REAL' ? '' : ' [SIM]';
+                    addEvent(`Alert: ${msg.data.message}${src}`, 'safety', 
+                        msg.data.severity === 'HIGH' ? 'danger' : 'warning');
+                    showToast(
+                        `${msg.data.alert_type}${src}`,
+                        msg.data.message,
+                        msg.data.severity === 'HIGH' ? 'danger' : 'warning',
+                        msg.data.severity === 'HIGH' ? '🚨' : '⚠️'
+                    );
+                }
+                break;
+
+            case 'ALERT_STATUS':
+                // Alert status changed
+                break;
+        }
+    }
+
+    /* ============================================================
+       MODE INDICATOR UPDATES
+       ============================================================ */
+    function updateModeIndicators() {
+        const badge = document.getElementById('dataModeBadge');
+        const icon = document.getElementById('dataModeIcon');
+        const label = document.getElementById('dataModeLabel');
+        const protoText = document.getElementById('prototypeText');
+
+        if (badge && label) {
+            badge.className = 'data-mode-badge';
+            switch (state.systemMode) {
+                case 'REAL_HARDWARE':
+                    badge.classList.add('real');
+                    label.textContent = 'REAL HARDWARE';
+                    if (protoText) protoText.textContent = 'REAL SENSOR MODE — Connected to ESP32 devices · Safe-speed recommendations are advisory only';
+                    break;
+                case 'MIXED':
+                    badge.classList.add('mixed');
+                    label.textContent = 'MIXED MODE';
+                    if (protoText) protoText.textContent = 'MIXED MODE — Real + simulated data · Each source labeled · Safe-speed recommendations are advisory only';
+                    break;
+                default: // SIMULATION
+                    label.textContent = 'SIMULATION';
+                    if (protoText) protoText.textContent = 'PROTOTYPE / DEMONSTRATION — Simulated sensor data · Safe-speed recommendations are advisory only · Not deployed in a real mine';
+                    break;
+            }
+        }
+
+        // Update offline badge
+        const offlineLabel = document.getElementById('offlineLabel');
+        if (offlineLabel) {
+            offlineLabel.textContent = state.backendConnected ? 'LOCAL MODE' : 'STANDALONE';
+        }
+    }
+
+    function updateSystemStatus(status) {
+        const badge = document.getElementById('systemStatusBadge');
+        const text = document.getElementById('systemStatusText');
+        if (badge) {
+            badge.classList.toggle('offline', status !== 'ONLINE');
+        }
+        if (text) {
+            text.textContent = status;
+        }
+    }
+
+    function addEvent(msg, category, severity) {
+        state.events.unshift({ msg, category, severity, time: new Date() });
+        if (state.events.length > CONFIG.eventLogMax) state.events.pop();
+        renderEventLog();
+    }
 
     /* ============================================================
        FOG PARTICLE BACKGROUND

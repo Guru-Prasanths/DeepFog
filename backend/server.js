@@ -1,18 +1,24 @@
 /**
- * DEEPFOG — Standalone Demo Server
+ * DEEPFOG — Dual-Mode Server (v3.0)
  * 
  * Intelligent Mine Vehicle Safety & Low-Visibility Monitoring System
  * 
- * This server runs WITHOUT PostgreSQL — it generates realistic simulated
- * mine vehicle telemetry in-memory so the full dashboard can be demonstrated
- * immediately. When PostgreSQL is available, the original models can be
- * restored by setting DEMO_MODE=false in .env.
+ * DUAL-MODE ARCHITECTURE:
+ *   DEMO_MODE=true  → In-memory SimEngine (no database required)
+ *   DEMO_MODE=false → PostgreSQL database with real sensor ingestion
+ *   AUTO-FALLBACK   → If PostgreSQL connection fails, auto-switches to demo mode
  * 
- * PROTOTYPE / DEMONSTRATION ONLY:
- * - All sensor data is simulated
- * - Safe-speed recommendations are driver advisory only
- * - Not deployed in a real mine
- * - No autonomous vehicle control
+ * FEATURES:
+ *   - REST API for dashboard, vehicles, sensors, alerts
+ *   - WebSocket server for real-time push updates
+ *   - Real ESP32 sensor data ingestion (POST /api/sensors)
+ *   - Transparent data source labeling (REAL / SIMULATED)
+ *   - Offline-first: no internet dependency for core operation
+ * 
+ * PROTOTYPE / DEMONSTRATION NOTICE:
+ *   - Safe-speed recommendations are driver advisory only
+ *   - Not deployed in a real mine
+ *   - No autonomous vehicle control
  */
 
 require('dotenv').config();
@@ -21,9 +27,22 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const path = require('path');
+const http = require('http');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+
+// ============================================================
+// SYSTEM STATE
+// ============================================================
+
+const SystemState = {
+    mode: 'INITIALIZING',         // REAL_HARDWARE | SIMULATION | MIXED | INITIALIZING
+    dbConnected: false,
+    startTime: Date.now(),
+    wsClients: new Set(),
+    lastBroadcast: null,
+};
 
 // ============================================================
 // MIDDLEWARE
@@ -51,20 +70,18 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// IN-MEMORY SIMULATED DATA ENGINE
+// IN-MEMORY SIMULATED DATA ENGINE (preserved from v2.0)
 // ============================================================
 
 const SimEngine = (() => {
     let tick = 0;
     const startTime = Date.now();
 
-    // Registered vehicles
+    // Registered vehicles — DEEPFOG Fleet Operations
     const vehicles = [
-        { vehicle_id: 'HMV-042', name: 'Haul Truck Alpha', type: '240T Haul Truck', status: 'active', created_at: new Date().toISOString() },
-        { vehicle_id: 'HMV-018', name: 'Haul Truck Bravo', type: '150T Haul Truck', status: 'active', created_at: new Date().toISOString() },
-        { vehicle_id: 'WTL-003', name: 'Wheel Loader C3', type: 'Wheel Loader', status: 'active', created_at: new Date().toISOString() },
-        { vehicle_id: 'DZR-011', name: 'Dozer D11', type: 'Dozer D9', status: 'active', created_at: new Date().toISOString() },
-        { vehicle_id: 'GRD-007', name: 'Grader G7', type: 'Motor Grader', status: 'maintenance', created_at: new Date().toISOString() },
+        { vehicle_id: 'DF-01', name: 'CAT 797F Alpha', type: 'CAT 797F (240t)', status: 'active', payload_status: 'LOADED', sector: 'Sector-4A', created_at: new Date().toISOString() },
+        { vehicle_id: 'DF-02', name: 'Komatsu 930E Bravo', type: 'Komatsu 930E', status: 'active', payload_status: 'EMPTY', sector: 'Sector-4B', created_at: new Date().toISOString() },
+        { vehicle_id: 'DF-03', name: 'BelAZ 75710 Charlie', type: 'BelAZ 75710', status: 'active', payload_status: 'LOADING', sector: 'Sector-4C', created_at: new Date().toISOString() },
     ];
 
     // Sensor history buffer (last 100 readings per vehicle)
@@ -82,7 +99,7 @@ const SimEngine = (() => {
      * Generate a realistic sensor reading for a given vehicle
      */
     function generateReading(vehicleId, t) {
-        const baseOffset = vehicleId.charCodeAt(4) || 0; // unique per vehicle
+        const baseOffset = vehicleId.charCodeAt(4) || 0;
         const phase = baseOffset * 0.3;
 
         const temperature = clamp(30 + Math.sin((t + phase) * 0.03) * 5 + jitter(1.5), 18, 50);
@@ -101,22 +118,18 @@ const SimEngine = (() => {
         let riskScore = 0;
         const reasons = [];
 
-        // Visibility risk (light level: lower = more dangerous)
         const visRisk = clamp((1 - light_level / 4095) * 40, 0, 40);
         if (visRisk > 20) reasons.push('Low visibility');
         riskScore += visRisk;
 
-        // Gas risk
         const gasRisk = clamp((gas_level / 900) * 25, 0, 25);
         if (gasRisk > 10) reasons.push('Elevated gas levels');
         riskScore += gasRisk;
 
-        // Obstacle proximity risk
         const distRisk = clamp((1 - distance / 500) * 20, 0, 20);
         if (distRisk > 12) reasons.push('Close obstacle detected');
         riskScore += distRisk;
 
-        // Vibration risk
         const vibRisk = clamp(vibration_intensity * 8, 0, 15);
         if (vibRisk > 8) reasons.push('High vibration');
         riskScore += vibRisk;
@@ -143,7 +156,7 @@ const SimEngine = (() => {
             risk_level: risk_level,
             risk_reasons: reasons,
             recorded_at: new Date().toISOString(),
-            source: 'DEMO_SIMULATOR'
+            source: 'SIMULATED'
         };
 
         return reading;
@@ -181,6 +194,7 @@ const SimEngine = (() => {
                 created_at: new Date().toISOString(),
                 acknowledged_at: null,
                 resolved_at: null,
+                source: 'SIMULATED'
             };
 
             alerts.unshift(alert);
@@ -191,18 +205,25 @@ const SimEngine = (() => {
     }
 
     /**
-     * Run a simulation tick — generate new readings for all active vehicles
+     * Run a simulation tick
      */
     function simulateTick() {
         tick++;
+        const newReadings = [];
+        const newAlerts = [];
+
         vehicles.filter(v => v.status === 'active').forEach(v => {
             const reading = generateReading(v.vehicle_id, tick);
             sensorHistory[v.vehicle_id].unshift(reading);
             if (sensorHistory[v.vehicle_id].length > 100) {
                 sensorHistory[v.vehicle_id].pop();
             }
-            maybeGenerateAlert(reading);
+            newReadings.push(reading);
+            const alert = maybeGenerateAlert(reading);
+            if (alert) newAlerts.push(alert);
         });
+
+        return { newReadings, newAlerts };
     }
 
     // Pre-fill history with 30 readings per vehicle
@@ -224,9 +245,6 @@ const SimEngine = (() => {
             maybeGenerateAlert(reading);
         }
     }
-
-    // Auto-tick every 5 seconds
-    setInterval(simulateTick, 5000);
 
     return {
         getVehicles: () => vehicles,
@@ -269,10 +287,121 @@ const SimEngine = (() => {
             }
             return null;
         },
+        simulateTick,
         tick: () => tick,
         uptime: () => Math.round((Date.now() - startTime) / 1000),
+        // Ingest a REAL sensor reading into the SimEngine buffer (for mixed mode)
+        ingestReading: (reading) => {
+            reading.source = reading.source || 'REAL';
+            const vid = reading.vehicle_id;
+            if (!sensorHistory[vid]) {
+                // Register new vehicle on-the-fly
+                vehicles.push({
+                    vehicle_id: vid,
+                    name: vid,
+                    type: 'ESP32 Device',
+                    status: 'active',
+                    created_at: new Date().toISOString()
+                });
+                sensorHistory[vid] = [];
+            }
+            sensorHistory[vid].unshift(reading);
+            if (sensorHistory[vid].length > 100) sensorHistory[vid].pop();
+            const alert = maybeGenerateAlert(reading);
+            return { reading, alert };
+        }
     };
 })();
+
+
+// ============================================================
+// DATABASE CONNECTION (attempt when DEMO_MODE is not forced)
+// ============================================================
+
+let dbPool = null;
+
+async function tryDatabaseConnection() {
+    if (process.env.DEMO_MODE === 'true') {
+        console.log('  [DB] DEMO_MODE=true — skipping PostgreSQL connection.');
+        SystemState.mode = 'SIMULATION';
+        return false;
+    }
+
+    try {
+        const { pool, testConnection } = require('./config/database');
+        const connected = await testConnection();
+        if (connected) {
+            dbPool = pool;
+            SystemState.dbConnected = true;
+            SystemState.mode = 'REAL_HARDWARE';
+            console.log('  [DB] ✓ PostgreSQL connected — REAL mode active.');
+            return true;
+        }
+    } catch (err) {
+        console.warn(`  [DB] PostgreSQL connection failed: ${err.message}`);
+    }
+
+    console.log('  [DB] Auto-fallback to SIMULATION mode (PostgreSQL unavailable).');
+    SystemState.mode = 'SIMULATION';
+    return false;
+}
+
+// ============================================================
+// RISK CALCULATION ENGINE (shared by both modes)
+// ============================================================
+
+function calculateRiskFromReading(reading) {
+    let riskScore = 0;
+    const reasons = [];
+
+    // Visibility risk (LDR: lower = more dangerous)
+    if (reading.light_level !== undefined) {
+        const visRisk = Math.max(0, Math.min(40, (1 - reading.light_level / 4095) * 40));
+        if (visRisk > 20) reasons.push('Low visibility');
+        riskScore += visRisk;
+    }
+
+    // Gas risk (MQ-2)
+    if (reading.gas_level !== undefined) {
+        const gasRisk = Math.max(0, Math.min(25, (reading.gas_level / 900) * 25));
+        if (gasRisk > 10) reasons.push('Elevated gas levels');
+        riskScore += gasRisk;
+    }
+
+    // Obstacle proximity risk (HC-SR04)
+    if (reading.distance !== undefined) {
+        const distRisk = Math.max(0, Math.min(20, (1 - reading.distance / 500) * 20));
+        if (distRisk > 12) reasons.push('Close obstacle detected');
+        riskScore += distRisk;
+    }
+
+    // Vibration / motion risk (MPU6050)
+    if (reading.vibration_intensity !== undefined) {
+        const vibRisk = Math.max(0, Math.min(15, reading.vibration_intensity * 8));
+        if (vibRisk > 8) reasons.push('High vibration');
+        riskScore += vibRisk;
+    }
+
+    // Acceleration risk
+    if (reading.acceleration !== undefined && reading.acceleration > 2.5) {
+        riskScore += 10;
+        reasons.push('High acceleration / impact');
+    }
+
+    // Tilt risk
+    if (reading.tilt !== undefined && Math.abs(reading.tilt) > 15) {
+        riskScore += 10;
+        reasons.push('Hazardous tilt angle');
+    }
+
+    riskScore = Math.round(Math.max(0, Math.min(100, riskScore)));
+    let risk_level = 'LOW';
+    if (riskScore >= 70) risk_level = 'HIGH';
+    else if (riskScore >= 40) risk_level = 'MEDIUM';
+
+    return { risk_score: riskScore, risk_level, risk_reasons: reasons };
+}
+
 
 // Evaluate sensor statuses for dashboard display
 function evaluateSensorStatuses(reading) {
@@ -282,12 +411,77 @@ function evaluateSensorStatuses(reading) {
         gas:          { status: reading.gas_level < 300 ? 'NORMAL' : reading.gas_level < 600 ? 'WARNING' : 'DANGER', value: reading.gas_level, unit: 'ADC' },
         temperature:  { status: reading.temperature < 40 ? 'NORMAL' : reading.temperature < 45 ? 'WARNING' : 'DANGER', value: reading.temperature, unit: '°C' },
         humidity:     { status: reading.humidity < 80 ? 'NORMAL' : reading.humidity < 90 ? 'WARNING' : 'DANGER', value: reading.humidity, unit: '%' },
-        vibration:    { status: reading.vibration_intensity < 0.8 ? 'NORMAL' : reading.vibration_intensity < 1.5 ? 'WARNING' : 'DANGER', value: reading.vibration_intensity, unit: 'g' },
+        vibration:    { status: (reading.vibration_intensity || 0) < 0.8 ? 'NORMAL' : (reading.vibration_intensity || 0) < 1.5 ? 'WARNING' : 'DANGER', value: reading.vibration_intensity || 0, unit: 'g' },
         distance:     { status: reading.distance > 200 ? 'NORMAL' : reading.distance > 80 ? 'WARNING' : 'DANGER', value: reading.distance, unit: 'cm' },
         acceleration: { status: reading.acceleration < 1.5 ? 'NORMAL' : reading.acceleration < 2.5 ? 'WARNING' : 'DANGER', value: reading.acceleration, unit: 'g' },
         tilt:         { status: Math.abs(reading.tilt) < 5 ? 'NORMAL' : Math.abs(reading.tilt) < 8 ? 'WARNING' : 'DANGER', value: reading.tilt, unit: '°' },
     };
 }
+
+
+// ============================================================
+// WEBSOCKET SERVER
+// ============================================================
+
+let wss = null;
+
+function initWebSocket(server) {
+    try {
+        const { WebSocketServer } = require('ws');
+        wss = new WebSocketServer({ server, path: '/ws' });
+
+        wss.on('connection', (ws, req) => {
+            const clientId = `ws-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`;
+            SystemState.wsClients.add(ws);
+            console.log(`  [WS] Client connected: ${clientId} (total: ${SystemState.wsClients.size})`);
+
+            // Send welcome message with system state
+            ws.send(JSON.stringify({
+                type: 'SYSTEM_STATE',
+                data: {
+                    mode: SystemState.mode,
+                    dbConnected: SystemState.dbConnected,
+                    uptime: Math.round((Date.now() - SystemState.startTime) / 1000),
+                    wsClients: SystemState.wsClients.size,
+                    timestamp: new Date().toISOString()
+                }
+            }));
+
+            ws.on('close', () => {
+                SystemState.wsClients.delete(ws);
+                console.log(`  [WS] Client disconnected: ${clientId} (total: ${SystemState.wsClients.size})`);
+            });
+
+            ws.on('error', (err) => {
+                console.error(`  [WS] Error on ${clientId}:`, err.message);
+                SystemState.wsClients.delete(ws);
+            });
+        });
+
+        console.log('  [WS] ✓ WebSocket server initialized on /ws');
+    } catch (err) {
+        console.warn('  [WS] WebSocket initialization failed:', err.message);
+    }
+}
+
+/**
+ * Broadcast a message to all connected WebSocket clients
+ */
+function wsBroadcast(type, data) {
+    if (!wss) return;
+    const message = JSON.stringify({ type, data, timestamp: new Date().toISOString() });
+    SystemState.wsClients.forEach(ws => {
+        if (ws.readyState === 1) { // WebSocket.OPEN
+            try {
+                ws.send(message);
+            } catch (err) {
+                console.error('  [WS] Broadcast error:', err.message);
+            }
+        }
+    });
+    SystemState.lastBroadcast = new Date().toISOString();
+}
+
 
 // ============================================================
 // API ROUTES
@@ -298,12 +492,17 @@ app.get('/api/health', (req, res) => {
     res.json({
         status: 'ok',
         service: 'DEEPFOG API',
-        mode: 'DEMO_SIMULATION',
-        database: 'in-memory (demo mode)',
-        uptime: SimEngine.uptime(),
+        version: '3.0.0',
+        mode: SystemState.mode,
+        database: SystemState.dbConnected ? 'PostgreSQL connected' : 'in-memory (demo mode)',
+        uptime: Math.round((Date.now() - SystemState.startTime) / 1000),
         simulationTick: SimEngine.tick(),
+        wsClients: SystemState.wsClients.size,
         timestamp: new Date().toISOString(),
-        note: 'Prototype / demonstration — not connected to a real mine'
+        offlineCapable: true,
+        note: SystemState.mode === 'SIMULATION'
+            ? 'PROTOTYPE — simulated data for demonstration purposes only'
+            : 'Receiving real sensor data from ESP32 devices'
     });
 });
 
@@ -311,12 +510,16 @@ app.get('/api/health', (req, res) => {
 app.get('/api', (req, res) => {
     res.json({
         service: 'DEEPFOG API',
-        version: '2.0.0',
-        mode: 'DEMO_SIMULATION',
+        version: '3.0.0',
+        mode: SystemState.mode,
         description: 'Intelligent Mine Vehicle Safety & Low-Visibility Monitoring System',
-        note: 'PROTOTYPE — simulated data for demonstration purposes only',
+        offlineCapable: true,
+        note: SystemState.mode === 'SIMULATION'
+            ? 'PROTOTYPE — simulated data for demonstration purposes only'
+            : 'Real sensor data mode active',
         endpoints: {
             health: 'GET /api/health',
+            system_mode: 'GET /api/system/mode',
             dashboard: 'GET /api/dashboard',
             vehicles: 'GET /api/vehicles',
             sensors_latest: 'GET /api/sensors/latest',
@@ -325,9 +528,39 @@ app.get('/api', (req, res) => {
             alerts: 'GET /api/alerts',
             recent_alerts: 'GET /api/alerts/recent',
             alert_stats: 'GET /api/alerts/stats',
+            websocket: 'WS /ws'
         }
     });
 });
+
+// --- System Mode ---
+app.get('/api/system/mode', (req, res) => {
+    res.json({
+        success: true,
+        data: {
+            mode: SystemState.mode,
+            dbConnected: SystemState.dbConnected,
+            wsClients: SystemState.wsClients.size,
+            uptime: Math.round((Date.now() - SystemState.startTime) / 1000),
+            offlineCapable: true,
+            internetRequired: false,
+            timestamp: new Date().toISOString()
+        }
+    });
+});
+
+// --- System Health ---
+app.get('/api/system/health', (req, res) => {
+    const health = {
+        backend: { status: 'HEALTHY', uptime: Math.round((Date.now() - SystemState.startTime) / 1000) },
+        database: { status: SystemState.dbConnected ? 'HEALTHY' : 'OFFLINE', type: SystemState.dbConnected ? 'PostgreSQL' : 'In-Memory' },
+        websocket: { status: wss ? 'HEALTHY' : 'OFFLINE', clients: SystemState.wsClients.size },
+        network: { status: 'HEALTHY', mode: 'LOCAL_LAN', internetRequired: false },
+        dataMode: SystemState.mode,
+    };
+    res.json({ success: true, data: health });
+});
+
 
 // --- Dashboard (primary polling endpoint) ---
 app.get('/api/dashboard', (req, res) => {
@@ -349,7 +582,8 @@ app.get('/api/dashboard', (req, res) => {
             riskReasons: reading ? reading.risk_reasons : [],
             activeAlerts: vehicleAlerts.length,
             lastUpdate: reading ? reading.recorded_at : null,
-            isOnline: !!reading
+            isOnline: !!reading,
+            dataSource: reading ? (reading.source || 'SIMULATED') : 'N/A'
         };
     });
 
@@ -364,10 +598,14 @@ app.get('/api/dashboard', (req, res) => {
         data: {
             system: {
                 status: 'ONLINE',
-                mode: 'DEMO_SIMULATION',
+                mode: SystemState.mode,
                 activeVehicles,
                 totalVehicles: vehicles.length,
                 overallRisk: highestRisk,
+                dbConnected: SystemState.dbConnected,
+                wsClients: SystemState.wsClients.size,
+                offlineCapable: true,
+                internetRequired: false,
                 timestamp: new Date().toISOString()
             },
             vehicles: vehicleDashboards,
@@ -400,6 +638,7 @@ app.get('/api/dashboard/vehicle/:vehicleId', (req, res) => {
             riskScore: reading ? reading.risk_score : 0,
             riskReasons: reading ? reading.risk_reasons : [],
             isOnline: !!reading,
+            dataSource: reading ? (reading.source || 'SIMULATED') : 'N/A',
             recentHistory: history,
             activeAlerts: vehicleAlerts,
         }
@@ -429,7 +668,7 @@ app.get('/api/sensors/latest', (req, res) => {
 app.get('/api/sensors/history', (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
     const vehicleId = req.query.vehicleId;
-    
+
     let data;
     if (vehicleId) {
         data = SimEngine.getHistory(vehicleId, limit);
@@ -447,15 +686,121 @@ app.get('/api/sensors/:vehicleId', (req, res) => {
     res.json({ success: true, data: reading });
 });
 
-// Accept incoming sensor data from ESP32 (or simulator)
+// ============================================================
+// REAL SENSOR DATA INGESTION (POST /api/sensors)
+// This is the critical endpoint that receives data from ESP32
+// ============================================================
 app.post('/api/sensors', (req, res) => {
-    console.log('  [SENSOR] Received POST /api/sensors:', JSON.stringify(req.body).substring(0, 200));
+    const payload = req.body;
+    const timestamp = new Date().toISOString();
+
+    // Validate required fields
+    if (!payload.vehicle_id) {
+        return res.status(400).json({
+            success: false,
+            error: { message: 'Missing required field: vehicle_id' }
+        });
+    }
+
+    // Calculate risk from real sensor data
+    const risk = calculateRiskFromReading(payload);
+
+    // Build enriched reading
+    const enrichedReading = {
+        id: Date.now() + Math.random(),
+        vehicle_id: payload.vehicle_id,
+        temperature: payload.temperature ?? null,
+        humidity: payload.humidity ?? null,
+        gas_level: payload.gas_level ?? null,
+        light_level: payload.light_level ?? null,
+        distance: payload.distance ?? null,
+        acceleration: payload.acceleration ?? null,
+        tilt: payload.tilt ?? null,
+        vibration_intensity: payload.vibration_intensity ?? null,
+        latitude: payload.latitude ?? null,
+        longitude: payload.longitude ?? null,
+        risk_score: risk.risk_score,
+        risk_level: risk.risk_level,
+        risk_reasons: risk.risk_reasons,
+        recorded_at: timestamp,
+        source: 'REAL'
+    };
+
+    // Ingest into SimEngine buffer (works in all modes)
+    const { reading, alert } = SimEngine.ingestReading(enrichedReading);
+
+    // If database is connected, also persist to PostgreSQL
+    if (SystemState.dbConnected && dbPool) {
+        const query = `
+            INSERT INTO sensor_readings
+                (vehicle_id, latitude, longitude, temperature, humidity, gas_level, light_level, distance, acceleration, tilt, vibration, risk_level, risk_score, risk_reasons)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            RETURNING id
+        `;
+        const values = [
+            enrichedReading.vehicle_id,
+            enrichedReading.latitude,
+            enrichedReading.longitude,
+            enrichedReading.temperature,
+            enrichedReading.humidity,
+            enrichedReading.gas_level,
+            enrichedReading.light_level,
+            enrichedReading.distance,
+            enrichedReading.acceleration,
+            enrichedReading.tilt,
+            enrichedReading.vibration_intensity > 0.5,
+            enrichedReading.risk_level,
+            enrichedReading.risk_score,
+            `{${enrichedReading.risk_reasons.map(r => `"${r}"`).join(',')}}`
+        ];
+
+        dbPool.query(query, values).catch(err => {
+            console.error('  [DB] Sensor persist error:', err.message);
+        });
+
+        // Persist alert if generated
+        if (alert) {
+            const alertQuery = `
+                INSERT INTO alerts (vehicle_id, alert_type, severity, message, risk_score)
+                VALUES ($1, $2, $3, $4, $5)
+            `;
+            dbPool.query(alertQuery, [
+                alert.vehicle_id, alert.alert_type, alert.severity, alert.message, alert.risk_score
+            ]).catch(err => {
+                console.error('  [DB] Alert persist error:', err.message);
+            });
+        }
+    }
+
+    // Update system mode if we're receiving real data
+    if (SystemState.mode === 'SIMULATION') {
+        SystemState.mode = 'MIXED';
+        console.log('  [MODE] Switched to MIXED — receiving real sensor data alongside simulation');
+    }
+
+    // Broadcast via WebSocket
+    wsBroadcast('SENSOR_UPDATE', enrichedReading);
+    if (alert) {
+        wsBroadcast('ALERT', alert);
+    }
+
+    // Log
+    const riskColor = risk.risk_level === 'HIGH' ? '\x1b[31m' : risk.risk_level === 'MEDIUM' ? '\x1b[33m' : '\x1b[32m';
+    console.log(`  [SENSOR] ${payload.vehicle_id} → ${riskColor}${risk.risk_level}\x1b[0m (${risk.risk_score}/100) [REAL]`);
+
     res.json({
         success: true,
-        message: 'Sensor data received (demo mode — data not persisted)',
-        timestamp: new Date().toISOString()
+        data: {
+            risk_level: risk.risk_level,
+            risk_score: risk.risk_score,
+            risk_reasons: risk.risk_reasons,
+            persisted: SystemState.dbConnected,
+            source: 'REAL',
+            timestamp
+        }
     });
 });
+
 
 // --- Alerts ---
 app.get('/api/alerts', (req, res) => {
@@ -483,7 +828,7 @@ app.get('/api/alerts/stats', (req, res) => {
 app.put('/api/alerts/:alertId/status', (req, res) => {
     const alertId = parseInt(req.params.alertId);
     const { status } = req.body;
-    
+
     if (!['ACTIVE', 'ACKNOWLEDGED', 'RESOLVED'].includes(status)) {
         return res.status(400).json({ success: false, error: { message: 'Invalid status. Use ACTIVE, ACKNOWLEDGED, or RESOLVED.' } });
     }
@@ -492,8 +837,13 @@ app.put('/api/alerts/:alertId/status', (req, res) => {
     if (!alert) {
         return res.status(404).json({ success: false, error: { message: 'Alert not found' } });
     }
+
+    // Broadcast status change
+    wsBroadcast('ALERT_STATUS', alert);
+
     res.json({ success: true, data: alert });
 });
+
 
 // ============================================================
 // SERVE FRONTEND
@@ -527,28 +877,93 @@ app.use((err, req, res, _next) => {
     });
 });
 
+
 // ============================================================
-// START
+// SIMULATION TICKER + WEBSOCKET BROADCAST
 // ============================================================
 
-app.listen(PORT, () => {
-    console.log('');
-    console.log('╔══════════════════════════════════════════════════════════╗');
-    console.log('║                  DEEPFOG SERVER v2.0                     ║');
-    console.log('║   Intelligent Mine Vehicle Safety & Low-Visibility       ║');
-    console.log('║                Monitoring System                         ║');
-    console.log('║                                                          ║');
-    console.log('║   ⚙  MODE: DEMO SIMULATION (no PostgreSQL required)     ║');
-    console.log('║   ⚠  PROTOTYPE — simulated data only                    ║');
-    console.log('╚══════════════════════════════════════════════════════════╝');
-    console.log('');
-    console.log(`  ✓ API server .......... http://localhost:${PORT}/api`);
-    console.log(`  ✓ Dashboard ........... http://localhost:${PORT}`);
-    console.log(`  ✓ Health check ........ http://localhost:${PORT}/api/health`);
-    console.log(`  ✓ Simulation engine ... running (tick every 5s)`);
-    console.log(`  ✓ Vehicles registered . ${SimEngine.getVehicles().length}`);
-    console.log('');
-    console.log('  Sensor data is simulated. Safe-speed recommendations');
-    console.log('  are for demonstration/driver advisory only.');
-    console.log('');
+function startSimulationLoop() {
+    setInterval(() => {
+        if (SystemState.mode === 'SIMULATION' || SystemState.mode === 'MIXED') {
+            const { newReadings, newAlerts } = SimEngine.simulateTick();
+
+            // Broadcast to all WS clients
+            if (newReadings.length > 0) {
+                wsBroadcast('SENSOR_BATCH', {
+                    readings: newReadings,
+                    source: 'SIMULATED'
+                });
+            }
+            newAlerts.forEach(alert => {
+                wsBroadcast('ALERT', alert);
+            });
+        }
+    }, 5000);
+}
+
+
+// ============================================================
+// START SERVER
+// ============================================================
+
+async function startServer() {
+    // 1. Attempt database connection
+    await tryDatabaseConnection();
+
+    // 2. Create HTTP server (needed for WebSocket upgrade)
+    const server = http.createServer(app);
+
+    // 3. Initialize WebSocket
+    initWebSocket(server);
+
+    // 4. Start simulation loop
+    startSimulationLoop();
+
+    // 5. Listen
+    server.listen(PORT, () => {
+        const modeLabel = {
+            'REAL_HARDWARE': '🟢 REAL HARDWARE (PostgreSQL)',
+            'SIMULATION': '🟡 DEMO SIMULATION (in-memory)',
+            'MIXED': '🔵 MIXED MODE',
+        }[SystemState.mode] || SystemState.mode;
+
+        console.log('');
+        console.log('╔══════════════════════════════════════════════════════════╗');
+        console.log('║                  DEEPFOG SERVER v3.0                     ║');
+        console.log('║   Intelligent Mine Vehicle Safety & Low-Visibility       ║');
+        console.log('║                Monitoring System                         ║');
+        console.log('║                                                          ║');
+        console.log(`║   ⚙  MODE: ${modeLabel.padEnd(43)}║`);
+        console.log('║   🌐 OFFLINE-CAPABLE: Yes (no internet required)        ║');
+        console.log('╚══════════════════════════════════════════════════════════╝');
+        console.log('');
+        console.log(`  ✓ API server .......... http://localhost:${PORT}/api`);
+        console.log(`  ✓ Dashboard ........... http://localhost:${PORT}`);
+        console.log(`  ✓ WebSocket ........... ws://localhost:${PORT}/ws`);
+        console.log(`  ✓ Health check ........ http://localhost:${PORT}/api/health`);
+        console.log(`  ✓ System mode ......... ${SystemState.mode}`);
+        console.log(`  ✓ Database ............ ${SystemState.dbConnected ? 'PostgreSQL connected' : 'In-memory (demo)'}`);
+        console.log(`  ✓ Sensor POST ......... http://localhost:${PORT}/api/sensors`);
+        console.log(`  ✓ Vehicles registered . ${SimEngine.getVehicles().length}`);
+        console.log(`  ✓ Simulation engine ... ${SystemState.mode !== 'REAL_HARDWARE' ? 'running (tick every 5s)' : 'standby'}`);
+        console.log('');
+        if (SystemState.mode === 'SIMULATION') {
+            console.log('  ⚠  Sensor data is SIMULATED. Safe-speed recommendations');
+            console.log('     are for demonstration/driver advisory only.');
+        } else {
+            console.log('  ✓  Real sensor data ingestion active via POST /api/sensors');
+            console.log('     ESP32 devices can send telemetry to this endpoint.');
+        }
+        console.log('');
+        console.log('  📡 ESP32 ingestion endpoint:');
+        console.log(`     POST http://<this-machine-ip>:${PORT}/api/sensors`);
+        console.log('     Header: X-API-Key: <your-api-key>');
+        console.log('     Body: JSON sensor payload');
+        console.log('');
+    });
+}
+
+startServer().catch(err => {
+    console.error('[FATAL] Server startup failed:', err);
+    process.exit(1);
 });
