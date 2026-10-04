@@ -4,6 +4,7 @@
   "description": "DEEPFOG — Intelligent Mine Vehicle Safety & Low-Visibility Monitoring System Backend",
   "main": "server.js",
   "scripts": {
+    "build": "echo 'Backend build complete'",
     "start": "node server.js",
     "dev": "node --watch server.js"
   },

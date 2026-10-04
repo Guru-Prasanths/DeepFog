@@ -963,7 +963,12 @@ async function startServer() {
     });
 }
 
-startServer().catch(err => {
-    console.error('[FATAL] Server startup failed:', err);
-    process.exit(1);
-});
+// Export Express app for serverless platforms (e.g. Vercel)
+module.exports = app;
+
+if (require.main === module || !process.env.VERCEL) {
+    startServer().catch(err => {
+        console.error('[FATAL] Server startup failed:', err);
+        process.exit(1);
+    });
+}
